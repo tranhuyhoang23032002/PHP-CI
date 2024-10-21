@@ -2,86 +2,81 @@ pipeline {
     agent any
     tools {
         jdk 'jdk17'
-        nodejs 'node16'
     }
     environment {
-        DOCKER_IMAGE = "my-php-app" // Tên Docker image của bạn
-        MYSQL_CONTAINER = "mysql" // Tên container MySQL
-        MYSQL_ROOT_PASSWORD = "rootpassword" // Mật khẩu root cho MySQL
-        MYSQL_DATABASE = "mydb" // Tên database cho MySQL
-        MYSQL_USER = "user" // User cho MySQL
-        MYSQL_PASSWORD = "password" // Mật khẩu cho user
         SCANNER_HOME = tool 'sonar-scanner'
-        APP_NAME = "demo"
+        APP_NAME = "php-demo"
         RELEASE = "1.0.0"
         DOCKER_USER = "hoangb2013534"
         DOCKER_PASS = 'dockerhub'
         IMAGE_NAME = "${DOCKER_USER}/${APP_NAME}"
         IMAGE_TAG = "${RELEASE}-${BUILD_NUMBER}"
-        SONAR_TOKEN = credentials("SonarQube-Token") // Thay đổi ở đây để lấy mã thông báo từ Jenkins
+        SONAR_TOKEN = credentials("SonarQube-Token") // Lấy mã token từ Jenkins
     }
-
     stages {
-        stage('Prepare') {
+        stage('Clean Workspace') {
             steps {
-                script {
-                    // Cleanup Docker containers and images from previous builds
-                    sh '''
-                    docker rm -f ${MYSQL_CONTAINER} || true
-                    docker rmi -f ${DOCKER_IMAGE} || true
-                    '''
+                cleanWs()
+            }
+        }
+        stage('Checkout from Git') {
+            steps {
+                git branch: 'main', url: 'https://github.com/LeeHoang123/nienluan_postgre.git' // Sửa thành repo của PHP project
+            }
+        }
+        stage("Sonarqube Analysis") {
+            steps {
+                withSonarQubeEnv('SonarQube-Server') {
+                    sh '''$SCANNER_HOME/bin/sonar-scanner -Dsonar.projectName=PHP-Demo-CI \
+                    -Dsonar.projectKey=PHP-Demo-CI \
+                    -Dsonar.login=${SONAR_TOKEN}'''
                 }
             }
         }
-
-        stage('Build PHP Docker Image') {
+        stage("Quality Gate") {
             steps {
                 script {
-                    // Xây dựng Docker image cho PHP từ Dockerfile trong project PHP của bạn
-                    sh '''
-                    docker build -t ${DOCKER_IMAGE} .
-                    '''
+                    waitForQualityGate abortPipeline: false, credentialsId: 'SonarQube-Token'
                 }
             }
         }
-
-        stage('Run MySQL Container') {
+        stage('Install Dependencies') {
             steps {
-                script {
-                    // Chạy MySQL container
-                    sh '''
-                    docker run -d --name ${MYSQL_CONTAINER} \
-                    -e MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD} \
-                    -e MYSQL_DATABASE=${MYSQL_DATABASE} \
-                    -e MYSQL_USER=${MYSQL_USER} \
-                    -e MYSQL_PASSWORD=${MYSQL_PASSWORD} \
-                    mysql:latest
-                    '''
-                }
+                sh "composer install" // Sử dụng composer để cài đặt các thư viện PHP
             }
         }
-
-        stage('Run PHP Container') {
+        stage('TRIVY FS SCAN') {
             steps {
-                script {
-                    // Chạy PHP container và kết nối nó với MySQL container
-                    sh '''
-                    docker run -d --name php-app --link ${MYSQL_CONTAINER}:mysql ${DOCKER_IMAGE}
-                    '''
-                }
+                sh "trivy fs . > trivyfs.txt" // Scan hệ thống tệp để tìm lỗ hổng
             }
         }
-    }
-
-    post {
-        always {
-            script {
-                // Cleanup sau khi job kết thúc
-                sh '''
-                docker rm -f php-app || true
-                docker rm -f ${MYSQL_CONTAINER} || true
-                '''
-            }
-        }
+        stage("Build & Push Docker Image") {
+             steps {
+                 script {
+                     docker.withRegistry('',DOCKER_PASS) {
+                         docker_image = docker.build "${IMAGE_NAME}"
+                     }
+                     docker.withRegistry('',DOCKER_PASS) {
+                         docker_image.push("${IMAGE_TAG}")
+                         docker_image.push('latest')
+                     }
+                 }
+             }
+         }
+    	 stage("Trivy Image Scan") {
+             steps {
+                 script {
+	              sh ('docker run -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy image hoangb2013534/php-demo:latest --no-progress --scanners vuln  --exit-code 0 --severity HIGH,CRITICAL --format table > trivyimage.txt')
+                 }
+             }
+         }
+	stage ('Cleanup Artifacts') {
+             steps {
+                 script {
+                      sh "docker rmi ${IMAGE_NAME}:${IMAGE_TAG}"
+                      sh "docker rmi ${IMAGE_NAME}:latest"
+                 }
+             }
+         }
     }
 }
